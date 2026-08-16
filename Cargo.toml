@@ -1,0 +1,9 @@
+[package]
+name = "codex-auth"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Back up and swap file-based Codex credentials"
+license = "MIT"
+
+[dependencies]
