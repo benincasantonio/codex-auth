@@ -1,5 +1,5 @@
 #[cfg(not(unix))]
-compile_error!("codex-auth supports macOS and Linux only");
+compile_error!("codex-switch supports macOS and Linux only");
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -9,13 +9,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitCode};
 
-const HELP: &str = "codex-auth - back up and swap file-based Codex credentials
+const HELP: &str = "codex-switch - list, back up, and swap file-based Codex credentials
 
 Usage:
-  codex-auth backup NAME [--force]
-  codex-auth swap NAME
-  codex-auth --help
-  codex-auth --version
+  codex-switch backup NAME [--force]
+  codex-switch swap NAME
+  codex-switch list
+  codex-switch --help
+  codex-switch --version
 
 Profile names may contain ASCII letters, digits, '_' and '-' only.";
 
@@ -23,6 +24,7 @@ Profile names may contain ASCII letters, digits, '_' and '-' only.";
 enum Command {
     Backup { name: String, force: bool },
     Swap { name: String },
+    List,
     Help,
     Version,
 }
@@ -62,12 +64,12 @@ fn main() -> ExitCode {
         env::var_os("HOME"),
     ) {
         Ok(Outcome::Help) => println!("{HELP}"),
-        Ok(Outcome::Version) => println!("codex-auth {}", env!("CARGO_PKG_VERSION")),
+        Ok(Outcome::Version) => println!("codex-switch {}", env!("CARGO_PKG_VERSION")),
         Ok(Outcome::Success(message)) => println!("{message}"),
         Err(error) => {
-            eprintln!("codex-auth: {}", error.message());
+            eprintln!("codex-switch: {}", error.message());
             if matches!(error, Failure::Usage(_)) {
-                eprintln!("Try 'codex-auth --help' for usage.");
+                eprintln!("Try 'codex-switch --help' for usage.");
             }
             return ExitCode::from(error.exit_code());
         }
@@ -105,6 +107,16 @@ where
                 "swapped auth.json with auth-{name}.json"
             )))
         }
+        Command::List => {
+            let root = resolve_codex_home(codex_home.as_deref(), home.as_deref())
+                .map_err(Failure::Operational)?;
+            let profiles = list_profiles(&root).map_err(Failure::Operational)?;
+            Ok(Outcome::Success(if profiles.is_empty() {
+                "No stored accounts.".into()
+            } else {
+                profiles.join("\n")
+            }))
+        }
     }
 }
 
@@ -130,6 +142,7 @@ where
         [command, name] if command == "swap" => Ok(Command::Swap {
             name: parse_name(name)?,
         }),
+        [command] if command == "list" => Ok(Command::List),
         [] => Err("missing command".into()),
         _ => Err("invalid arguments".into()),
     }
@@ -198,6 +211,39 @@ fn swap(root: &Path, name: &str) -> Result<(), String> {
 
 fn profile_path(root: &Path, name: &str) -> PathBuf {
     root.join(format!("auth-{name}.json"))
+}
+
+fn list_profiles(root: &Path) -> Result<Vec<String>, String> {
+    let entries = fs::read_dir(root)
+        .map_err(|error| format!("could not read {}: {error}", root.display()))?;
+    let mut profiles = Vec::new();
+
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("could not read an entry in {}: {error}", root.display()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("could not inspect {}: {error}", entry.path().display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        if let Some(name) = profile_name(&file_name) {
+            profiles.push(name.to_string());
+        }
+    }
+
+    profiles.sort();
+    Ok(profiles)
+}
+
+fn profile_name(file_name: &OsStr) -> Option<&str> {
+    let name = file_name
+        .to_str()?
+        .strip_prefix("auth-")?
+        .strip_suffix(".json")?;
+    parse_name(OsStr::new(name)).ok().map(|_| name)
 }
 
 fn validate_source(path: &Path) -> Result<(), String> {
@@ -298,7 +344,7 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             let path = env::temp_dir().join(format!(
-                "codex-auth-test-{}-{}",
+                "codex-account-switcher-test-{}-{}",
                 process::id(),
                 NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
             ));
@@ -367,13 +413,14 @@ mod tests {
                 name: "work_2".into()
             })
         );
+        assert_eq!(parse_args(args(&["list"])), Ok(Command::List));
     }
 
     #[test]
     fn rejects_invalid_arguments_and_profile_names() {
         for invalid in [
             args(&[]),
-            args(&["list"]),
+            args(&["list", "extra"]),
             args(&["backup", ""]),
             args(&["backup", "../work"]),
             args(&["backup", "work profile"]),
@@ -452,6 +499,64 @@ mod tests {
         assert!(swap(root.path(), "directory").is_err());
         assert_eq!(fs::read(&active).unwrap(), b"keep me");
         assert!(temporary_files(root.path()).is_empty());
+    }
+
+    #[test]
+    fn lists_regular_profiles_in_ascii_order_without_reading_contents() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::fs::symlink;
+
+        let root = TestDirectory::new();
+        for (name, contents) in [
+            ("auth-personal.json", b"secret".as_slice()),
+            ("auth-Work.json", b"another secret".as_slice()),
+            ("auth-work_2.json", b"".as_slice()),
+            ("auth.json", b"active".as_slice()),
+            ("auth-invalid.name.json", b"ignored".as_slice()),
+            ("notes.txt", b"ignored".as_slice()),
+        ] {
+            write_file(&root.path().join(name), contents, 0o600);
+        }
+        fs::create_dir(root.path().join("auth-directory.json")).unwrap();
+        symlink(
+            root.path().join("auth-personal.json"),
+            root.path().join("auth-linked.json"),
+        )
+        .unwrap();
+        let non_utf8 = OsString::from_vec(b"auth-\xff.json".to_vec());
+        assert_eq!(profile_name(&non_utf8), None);
+
+        assert_eq!(
+            list_profiles(root.path()),
+            Ok(vec!["Work".into(), "personal".into(), "work_2".into()])
+        );
+        assert!(matches!(
+            execute(
+                args(&["list"]),
+                Some(root.path().as_os_str().to_owned()),
+                None
+            ),
+            Ok(Outcome::Success(message)) if message == "Work\npersonal\nwork_2"
+        ));
+    }
+
+    #[test]
+    fn list_reports_empty_and_unreadable_directories() {
+        let root = TestDirectory::new();
+        assert!(matches!(
+            execute(
+                args(&["list"]),
+                Some(root.path().as_os_str().to_owned()),
+                None
+            ),
+            Ok(Outcome::Success(message)) if message == "No stored accounts."
+        ));
+
+        let missing = root.path().join("missing");
+        let error = execute(args(&["list"]), Some(missing.into_os_string()), None).unwrap_err();
+        assert!(matches!(error, Failure::Operational(_)));
+        assert_eq!(error.exit_code(), 1);
+        assert!(error.message().contains("could not read"));
     }
 
     #[test]

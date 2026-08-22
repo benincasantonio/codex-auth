@@ -1,9 +1,13 @@
 [package]
-name = "codex-auth"
+name = "codex-account-switcher"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Back up and swap file-based Codex credentials"
+description = "List, back up, and swap file-based Codex credentials"
 license = "MIT"
+
+[[bin]]
+name = "codex-switch"
+path = "src/main.rs"
 
 [dependencies]
