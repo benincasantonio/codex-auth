@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "codex-auth"
+name = "codex-account-switcher"
 version = "1.0.0"
